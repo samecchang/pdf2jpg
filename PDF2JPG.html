@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF to JPG / PNG</title>
+  <style>
+    :root { --bg:#f6f7fb; --card:#fff; --border:#d9dce5; --accent:#2563eb; --muted:#5b6170; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); font-family:"Inter",system-ui,sans-serif; color:#111; padding:16px; display:flex; justify-content:center; }
+    .container { width:min(1100px,100%); display:flex; flex-direction:column; gap:14px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px; box-shadow:0 10px 24px rgba(0,0,0,0.06); }
+    .dropzone {
+      border:2px dashed var(--border); border-radius:12px; padding:40px 20px; text-align:center;
+      cursor:pointer; transition:border-color 180ms, background 180ms;
+    }
+    .dropzone.dragover { border-color:var(--accent); background:rgba(37,99,235,0.06); }
+    .dropzone p { margin:0 0 8px; font-size:16px; color:var(--muted); }
+    button { padding:10px 16px; border:none; border-radius:10px; font-size:15px; cursor:pointer; background:var(--accent); color:#fff; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+    .progress { height:6px; border-radius:6px; background:#e5e7eb; overflow:hidden; }
+    .progress-bar { height:100%; width:0; background:var(--accent); border-radius:6px; transition:width 200ms; }
+    .status { font-size:14px; color:var(--muted); margin-top:6px; }
+    .gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+    .thumb { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px; box-shadow:0 6px 14px rgba(0,0,0,0.05); }
+    .thumb img { width:100%; border-radius:8px; display:block; }
+    .thumb .meta { font-size:13px; color:var(--muted); margin-top:6px; }
+    .thumb .dl-btn { display:inline-block; margin-top:6px; padding:5px 10px; font-size:13px; border-radius:8px; background:var(--accent); color:#fff; border:none; cursor:pointer; text-decoration:none; }
+    .thumb .dl-btn:hover { opacity:0.85; }
+    #downloadAll { display:none; margin-top:10px; width:100%; padding:12px; font-size:15px; border-radius:10px; background:#16a34a; color:#fff; border:none; cursor:pointer; }
+    #downloadAll:hover { opacity:0.9; }
+    input[type="file"] { display:none; }
+    .fmt-bar { display:flex; align-items:center; gap:10px; margin-top:10px; }
+    .fmt-bar label { font-size:14px; color:var(--muted); cursor:pointer; display:flex; align-items:center; gap:4px; }
+    .fmt-bar input[type="radio"] { display:inline-block; margin:0; accent-color:var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="dropzone" id="dropzone">
+        <p>Drag &amp; drop a PDF here, or click to browse</p>
+        <label style="display:inline-block;padding:8px 14px;background:var(--accent);color:#fff;border-radius:10px;cursor:pointer;">
+          Choose PDF
+          <input type="file" id="fileInput" accept=".pdf,application/pdf" />
+        </label>
+      </div>
+      <div class="fmt-bar">
+        <span style="font-size:14px;color:var(--muted);">Format:</span>
+        <label><input type="radio" name="fmt" value="jpg" checked /> JPG</label>
+        <label><input type="radio" name="fmt" value="png" /> PNG</label>
+      </div>
+      <button id="convertBtn" disabled style="margin-top:10px;width:100%;">Convert</button>
+      <div class="progress" style="margin-top:8px;"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="status" id="status">No file selected.</div>
+    </div>
+    <button id="downloadAll">Download All Images</button>
+    <section class="gallery" id="gallery"></section>
+  </div>
+
+  <script src="pdf.min.js"></script>
+  <script>
+    const WORKER_SRC = 'pdf.worker.min.js';
+    const SCALE = 2;
+    const JPG_QUALITY = 0.92;
+
+    function getFormat(){
+      var checked = document.querySelector('input[name="fmt"]:checked');
+      return checked ? checked.value : 'jpg';
+    }
+
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const convertBtn = document.getElementById('convertBtn');
+    const progressBar = document.getElementById('progressBar');
+    const statusEl = document.getElementById('status');
+    const gallery = document.getElementById('gallery');
+
+    let currentFile = null;
+    let pdfBaseName = 'page';
+
+    function setStatus(msg, isErr=false){
+      statusEl.textContent = msg;
+      statusEl.style.color = isErr ? '#b91c1c' : '#5b6170';
+    }
+    function setProgress(pct){ progressBar.style.width = pct + '%'; }
+
+    function isPdf(file){
+      if(!file) return false;
+      if(file.type === 'application/pdf') return true;
+      return /\.pdf$/i.test(file.name);
+    }
+
+    function setFile(file){
+      if(!isPdf(file)){ setStatus('Not a valid PDF file.', true); currentFile=null; convertBtn.disabled=true; return; }
+      currentFile = file;
+      pdfBaseName = file.name.replace(/\.pdf$/i, '') || 'page';
+      convertBtn.disabled = false;
+      setStatus('Selected: ' + file.name + ' (' + (file.size/1024).toFixed(1) + ' KB)');
+    }
+
+    // Prevent browser from opening dropped files
+    document.addEventListener('dragover', function(e){ e.preventDefault(); });
+    document.addEventListener('drop', function(e){ e.preventDefault(); });
+
+    dropzone.addEventListener('dragenter', function(){ dropzone.classList.add('dragover'); });
+    dropzone.addEventListener('dragover', function(e){ e.preventDefault(); e.dataTransfer.dropEffect='copy'; });
+    dropzone.addEventListener('dragleave', function(){ dropzone.classList.remove('dragover'); });
+    dropzone.addEventListener('drop', function(e){
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.remove('dragover');
+      var files = e.dataTransfer.files;
+      if(files.length) setFile(files[0]);
+    });
+
+    fileInput.addEventListener('change', function(){
+      if(fileInput.files.length) setFile(fileInput.files[0]);
+      fileInput.value = '';
+    });
+
+    convertBtn.addEventListener('click', function(){
+      if(currentFile) handleFile(currentFile);
+    });
+
+    async function handleFile(file){
+      convertBtn.disabled = true;
+      gallery.innerHTML = '';
+      document.getElementById('downloadAll').style.display = 'none';
+      setProgress(0);
+      setStatus('Loading PDF...');
+      try {
+        var arrayBuffer = await file.arrayBuffer();
+        var pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib;
+        if(!pdfjsLib){
+          setStatus('pdf.js failed to load. Check your internet connection.', true);
+          convertBtn.disabled = false;
+          return;
+        }
+        pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_SRC;
+        var pdf = null;
+        var docParams = { data: arrayBuffer };
+        while(!pdf){
+          try {
+            pdf = await pdfjsLib.getDocument(docParams).promise;
+          } catch(pwErr){
+            if(pwErr.name === 'PasswordException'){
+              var msg = docParams.password ? 'Incorrect password. Try again:' : 'This PDF is password-protected. Enter the password:';
+              var pw = prompt(msg);
+              if(pw === null){ setStatus('Cancelled — password required.', true); convertBtn.disabled = false; return; }
+              docParams.password = pw;
+              continue;
+            }
+            throw pwErr;
+          }
+        }
+        var total = pdf.numPages;
+        setStatus('Processing ' + total + ' page(s)...');
+
+        for(var i = 1; i <= total; i++){
+          var page = await pdf.getPage(i);
+          var viewport = page.getViewport({ scale: SCALE });
+          var canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          var ctx = canvas.getContext('2d');
+          await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+          var fmt = getFormat();
+          var mime = fmt === 'png' ? 'image/png' : 'image/jpeg';
+          var dataUrl = fmt === 'png' ? canvas.toDataURL(mime) : canvas.toDataURL(mime, JPG_QUALITY);
+          appendThumb(dataUrl, i, total, canvas.width, canvas.height);
+          setProgress(Math.round(i / total * 100));
+          setStatus('Converted page ' + i + ' / ' + total);
+        }
+        setStatus('Done — ' + total + ' page(s) converted.');
+        document.getElementById('downloadAll').style.display = 'block';
+      } catch(err){
+        console.error(err);
+        setStatus('Error: ' + (err.message || 'Failed to process PDF.'), true);
+      }
+      convertBtn.disabled = false;
+    }
+
+    function appendThumb(dataUrl, pageNum, total, w, h){
+      var card = document.createElement('div');
+      card.className = 'thumb';
+      var img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = 'Page ' + pageNum;
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      var fmt = getFormat();
+      meta.textContent = 'Page ' + pageNum + ' / ' + total + '  \u2014  ' + w + ' x ' + h + '  (' + fmt.toUpperCase() + ')';
+      var dlBtn = document.createElement('a');
+      dlBtn.className = 'dl-btn';
+      dlBtn.href = dataUrl;
+      dlBtn.download = pdfBaseName + '_page' + pageNum + '.' + fmt;
+      dlBtn.textContent = 'Download';
+      card.appendChild(img);
+      card.appendChild(meta);
+      card.appendChild(dlBtn);
+      gallery.appendChild(card);
+    }
+
+    document.getElementById('downloadAll').addEventListener('click', function(){
+      var links = gallery.querySelectorAll('a.dl-btn');
+      var delay = 0;
+      links.forEach(function(a){
+        setTimeout(function(){
+          var tmp = document.createElement('a');
+          tmp.href = a.href;
+          tmp.download = a.download;
+          document.body.appendChild(tmp);
+          tmp.click();
+          document.body.removeChild(tmp);
+        }, delay);
+        delay += 150;
+      });
+    });
+  </script>
+</body>
+</html>
